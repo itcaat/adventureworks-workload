@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	"adventureworks-workload/internal/app"
+	"adventureworks-workload/internal/tui"
 )
 
 func main() {
@@ -26,7 +28,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	logger := newLogger(cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -43,7 +45,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	report, err := app.Run(ctx, db, cfg, logger)
+	var report app.Report
+	if cfg.TUI {
+		report, err = tui.RunWithWorkload(ctx, cfg, func(runCtx context.Context, onProgress app.ProgressFunc) (app.Report, error) {
+			return app.Run(runCtx, db, cfg, logger, onProgress)
+		})
+	} else {
+		report, err = app.Run(ctx, db, cfg, logger, nil)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("run workload", "error", err)
 		os.Exit(1)
@@ -56,4 +65,11 @@ func main() {
 
 	fmt.Println()
 	fmt.Println(report.MarkdownSummary())
+}
+
+func newLogger(cfg app.Config) *slog.Logger {
+	if cfg.TUI {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	}
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 }

@@ -40,19 +40,27 @@ func TestReportMarkdownIncludesKeySections(t *testing.T) {
 		OperationsPerSecond: 1.67,
 		Operations: []OperationReport{
 			{
-				Name:      "catalog_search",
-				Kind:      "read",
-				Count:     100,
-				Errors:    2,
-				ErrorRate: 0.02,
-				Avg:       10 * time.Millisecond,
-				P50:       10 * time.Millisecond,
-				P95:       20 * time.Millisecond,
-				P99:       30 * time.Millisecond,
-				Max:       40 * time.Millisecond,
-				Failures:  map[string]int64{"context deadline exceeded": 2},
+				Name:             "catalog_search",
+				Kind:             "read",
+				Count:            100,
+				Errors:           2,
+				ErrorRate:        0.02,
+				Avg:              10 * time.Millisecond,
+				P50:              10 * time.Millisecond,
+				P95:              20 * time.Millisecond,
+				P99:              30 * time.Millisecond,
+				Max:              40 * time.Millisecond,
+				Failures:         map[string]int64{"context deadline exceeded": 2},
+				BytesSent:        12000,
+				BytesReceived:    480000,
+				AvgBytesSent:     120,
+				AvgBytesReceived: 4800,
 			},
 		},
+		BytesSent:              12000,
+		BytesReceived:          480000,
+		BytesSentPerSecond:     200,
+		BytesReceivedPerSecond: 8000,
 		Personas: map[string]int64{"shopper": 100},
 	}
 
@@ -64,6 +72,8 @@ func TestReportMarkdownIncludesKeySections(t *testing.T) {
 		"## Error Samples",
 		"`catalog_search`",
 		"context deadline exceeded",
+		"Payload sent",
+		"Payload received",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("Markdown missing %q\n%s", want, md)

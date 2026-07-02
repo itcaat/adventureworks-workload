@@ -12,7 +12,7 @@ type Operation struct {
 	Name   string
 	Kind   string
 	Weight int
-	Run    func(context.Context, *sql.DB, *rand.Rand, Persona) error
+	Run    func(context.Context, *sql.DB, *rand.Rand, Persona) (TrafficStats, error)
 }
 
 type Persona struct {
@@ -164,11 +164,11 @@ func thinkDuration(cfg Config, p Persona, rng *rand.Rand) time.Duration {
 	return time.Duration(float64(cfg.ThinkMin+time.Duration(rng.Int63n(int64(delta)))) * p.Tempo)
 }
 
-func queryCatalogSearch(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func queryCatalogSearch(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 	colors := []string{"", "Black", "Blue", "Red", "Silver", "Yellow", "Multi"}
 	color := colors[rng.Intn(len(colors))]
 	limit := 10 + rng.Intn(25)
-	rows, err := db.QueryContext(ctx, `
+	query := `
 SELECT TOP (@limit)
     p.ProductID,
     p.Name,
@@ -182,16 +182,15 @@ LEFT JOIN Production.ProductSubcategory AS ps ON ps.ProductSubcategoryID = p.Pro
 LEFT JOIN Production.ProductCategory AS pc ON pc.ProductCategoryID = ps.ProductCategoryID
 WHERE p.FinishedGoodsFlag = 1
   AND (@color = '' OR p.Color = @color)
-ORDER BY p.ListPrice DESC, p.Name;`,
-		sql.Named("limit", limit),
-		sql.Named("color", color),
-	)
-	return drainRows(rows, err)
+ORDER BY p.ListPrice DESC, p.Name;`
+	args := []any{sql.Named("limit", limit), sql.Named("color", color)}
+	rows, err := db.QueryContext(ctx, query, args...)
+	return drainRows(rows, err, requestBytes(query, args...))
 }
 
-func queryCustomerOrderHistory(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func queryCustomerOrderHistory(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 	limit := 20 + rng.Intn(40)
-	rows, err := db.QueryContext(ctx, `
+	query := `
 WITH PickedCustomer AS (
     SELECT TOP (1) CustomerID
     FROM Sales.Customer
@@ -209,15 +208,15 @@ FROM PickedCustomer AS pc
 JOIN Sales.Customer AS c ON c.CustomerID = pc.CustomerID
 LEFT JOIN Person.Person AS p ON p.BusinessEntityID = c.PersonID
 LEFT JOIN Sales.SalesOrderHeader AS soh ON soh.CustomerID = c.CustomerID
-ORDER BY soh.OrderDate DESC;`,
-		sql.Named("limit", limit),
-	)
-	return drainRows(rows, err)
+ORDER BY soh.OrderDate DESC;`
+	args := []any{sql.Named("limit", limit)}
+	rows, err := db.QueryContext(ctx, query, args...)
+	return drainRows(rows, err, requestBytes(query, args...))
 }
 
-func queryOrderDetailLookup(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func queryOrderDetailLookup(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 	limit := 12 + rng.Intn(30)
-	rows, err := db.QueryContext(ctx, `
+	query := `
 WITH PickedOrder AS (
     SELECT TOP (1) SalesOrderID
     FROM Sales.SalesOrderHeader
@@ -236,14 +235,14 @@ FROM PickedOrder AS po
 JOIN Sales.SalesOrderHeader AS soh ON soh.SalesOrderID = po.SalesOrderID
 JOIN Sales.SalesOrderDetail AS sod ON sod.SalesOrderID = soh.SalesOrderID
 JOIN Production.Product AS p ON p.ProductID = sod.ProductID
-ORDER BY sod.SalesOrderDetailID;`,
-		sql.Named("limit", limit),
-	)
-	return drainRows(rows, err)
+ORDER BY sod.SalesOrderDetailID;`
+	args := []any{sql.Named("limit", limit)}
+	rows, err := db.QueryContext(ctx, query, args...)
+	return drainRows(rows, err, requestBytes(query, args...))
 }
 
-func queryInventoryAvailability(ctx context.Context, db *sql.DB, _ *rand.Rand, _ Persona) error {
-	rows, err := db.QueryContext(ctx, `
+func queryInventoryAvailability(ctx context.Context, db *sql.DB, _ *rand.Rand, _ Persona) (TrafficStats, error) {
+	query := `
 SELECT TOP (50)
     p.ProductID,
     p.Name,
@@ -253,12 +252,13 @@ SELECT TOP (50)
 FROM Production.Product AS p
 JOIN Production.ProductInventory AS pi ON pi.ProductID = p.ProductID
 GROUP BY p.ProductID, p.Name
-ORDER BY QuantityOnHand ASC, p.Name;`)
-	return drainRows(rows, err)
+ORDER BY QuantityOnHand ASC, p.Name;`
+	rows, err := db.QueryContext(ctx, query)
+	return drainRows(rows, err, requestBytes(query))
 }
 
-func querySalesDashboard(ctx context.Context, db *sql.DB, _ *rand.Rand, _ Persona) error {
-	rows, err := db.QueryContext(ctx, `
+func querySalesDashboard(ctx context.Context, db *sql.DB, _ *rand.Rand, _ Persona) (TrafficStats, error) {
+	query := `
 SELECT
     st.Name AS Territory,
     YEAR(soh.OrderDate) AS OrderYear,
@@ -268,13 +268,14 @@ SELECT
 FROM Sales.SalesOrderHeader AS soh
 LEFT JOIN Sales.SalesTerritory AS st ON st.TerritoryID = soh.TerritoryID
 GROUP BY st.Name, YEAR(soh.OrderDate)
-ORDER BY OrderYear DESC, Revenue DESC;`)
-	return drainRows(rows, err)
+ORDER BY OrderYear DESC, Revenue DESC;`
+	rows, err := db.QueryContext(ctx, query)
+	return drainRows(rows, err, requestBytes(query))
 }
 
-func queryVendorPurchasing(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func queryVendorPurchasing(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 	limit := 10 + rng.Intn(20)
-	rows, err := db.QueryContext(ctx, `
+	query := `
 WITH PickedVendor AS (
     SELECT TOP (1) BusinessEntityID
     FROM Purchasing.Vendor
@@ -292,25 +293,25 @@ FROM PickedVendor AS pv
 JOIN Purchasing.Vendor AS v ON v.BusinessEntityID = pv.BusinessEntityID
 LEFT JOIN Purchasing.PurchaseOrderHeader AS poh ON poh.VendorID = v.BusinessEntityID
 LEFT JOIN Purchasing.PurchaseOrderDetail AS pod ON pod.PurchaseOrderID = poh.PurchaseOrderID
-ORDER BY poh.OrderDate DESC, pod.PurchaseOrderDetailID;`,
-		sql.Named("limit", limit),
-	)
-	return drainRows(rows, err)
+ORDER BY poh.OrderDate DESC, pod.PurchaseOrderDetailID;`
+	args := []any{sql.Named("limit", limit)}
+	rows, err := db.QueryContext(ctx, query, args...)
+	return drainRows(rows, err, requestBytes(query, args...))
 }
 
-func queryEmployeeManagers(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func queryEmployeeManagers(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 	employeeID := 1 + rng.Intn(290)
-	rows, err := db.QueryContext(ctx, `EXEC dbo.uspGetEmployeeManagers @BusinessEntityID = @employee_id;`,
-		sql.Named("employee_id", employeeID),
-	)
-	return drainRows(rows, err)
+	query := `EXEC dbo.uspGetEmployeeManagers @BusinessEntityID = @employee_id;`
+	args := []any{sql.Named("employee_id", employeeID)}
+	rows, err := db.QueryContext(ctx, query, args...)
+	return drainRows(rows, err, requestBytes(query, args...))
 }
 
-func cartAddItem(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) error {
-	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) error {
+func cartAddItem(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) (TrafficStats, error) {
+	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) (TrafficStats, error) {
 		cartID := fmt.Sprintf("awload-%s-u%03d-c%04d", runID, p.ID, rng.Intn(1000))
 		quantity := 1 + rng.Intn(4)
-		_, err := db.ExecContext(ctx, `
+		query := `
 INSERT INTO Sales.ShoppingCartItem (ShoppingCartID, Quantity, ProductID, DateCreated, ModifiedDate)
 SELECT @cart_id, @quantity, picked.ProductID, GETDATE(), GETDATE()
 FROM (
@@ -318,53 +319,53 @@ FROM (
     FROM Production.Product
     WHERE FinishedGoodsFlag = 1
     ORDER BY NEWID()
-) AS picked;`,
-			sql.Named("cart_id", cartID),
-			sql.Named("quantity", quantity),
-		)
-		return err
+) AS picked;`
+		args := []any{sql.Named("cart_id", cartID), sql.Named("quantity", quantity)}
+		return execStatement(ctx, db, query, args...)
 	}
 }
 
-func cartUpdateItem(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) error {
-	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) error {
+func cartUpdateItem(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) (TrafficStats, error) {
+	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) (TrafficStats, error) {
 		prefix := fmt.Sprintf("awload-%s-u%03d", runID, p.ID)
 		quantity := 1 + rng.Intn(8)
-		_, err := db.ExecContext(ctx, `
+		query := `
 UPDATE TOP (1) Sales.ShoppingCartItem
 SET Quantity = @quantity, ModifiedDate = GETDATE()
-WHERE ShoppingCartID LIKE @prefix + '%';`,
-			sql.Named("prefix", prefix),
-			sql.Named("quantity", quantity),
-		)
-		return err
+WHERE ShoppingCartID LIKE @prefix + '%';`
+		args := []any{sql.Named("prefix", prefix), sql.Named("quantity", quantity)}
+		return execStatement(ctx, db, query, args...)
 	}
 }
 
-func cartCleanup(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) error {
-	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) error {
+func cartCleanup(runID string) func(context.Context, *sql.DB, *rand.Rand, Persona) (TrafficStats, error) {
+	return func(ctx context.Context, db *sql.DB, rng *rand.Rand, _ Persona) (TrafficStats, error) {
 		batch := 5 + rng.Intn(15)
 		prefix := fmt.Sprintf("awload-%s", runID)
-		_, err := db.ExecContext(ctx, `
+		query := `
 DELETE TOP (@batch) FROM Sales.ShoppingCartItem
 WHERE ShoppingCartID LIKE @prefix + '%'
-  AND DateCreated < DATEADD(second, -30, GETDATE());`,
-			sql.Named("batch", batch),
-			sql.Named("prefix", prefix),
-		)
-		return err
+  AND DateCreated < DATEADD(second, -30, GETDATE());`
+		args := []any{sql.Named("batch", batch), sql.Named("prefix", prefix)}
+		return execStatement(ctx, db, query, args...)
 	}
 }
 
-func drainRows(rows *sql.Rows, err error) error {
+func execStatement(ctx context.Context, db *sql.DB, query string, args ...any) (TrafficStats, error) {
+	_, err := db.ExecContext(ctx, query, args...)
+	return TrafficStats{Sent: requestBytes(query, args...)}, err
+}
+
+func drainRows(rows *sql.Rows, err error, sent int64) (TrafficStats, error) {
+	traffic := TrafficStats{Sent: sent}
 	if err != nil {
-		return err
+		return traffic, err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return err
+		return traffic, err
 	}
 	values := make([]sql.RawBytes, len(cols))
 	scanArgs := make([]any, len(values))
@@ -373,8 +374,11 @@ func drainRows(rows *sql.Rows, err error) error {
 	}
 	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
-			return err
+			return traffic, err
+		}
+		for _, v := range values {
+			traffic.Received += int64(len(v))
 		}
 	}
-	return rows.Err()
+	return traffic, rows.Err()
 }

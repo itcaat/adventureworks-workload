@@ -41,6 +41,7 @@ type Config struct {
 	ConnMaxLifetime time.Duration
 
 	LogLevel slog.Level
+	TUI      bool
 }
 
 func ParseConfig(args []string, getenv func(string) string) (Config, error) {
@@ -90,10 +91,21 @@ func ParseConfig(args []string, getenv func(string) string) (Config, error) {
 	fs.IntVar(&cfg.MaxOpenConns, "max-open-conns", intFromEnv(getenv, "AWLOAD_MAX_OPEN_CONNS", 0), "database/sql max open conns; 0 derives from users")
 	fs.IntVar(&cfg.MaxIdleConns, "max-idle-conns", intFromEnv(getenv, "AWLOAD_MAX_IDLE_CONNS", 0), "database/sql max idle conns; 0 derives from users")
 	fs.DurationVar(&cfg.ConnMaxLifetime, "conn-max-lifetime", cfg.ConnMaxLifetime, "database/sql connection max lifetime")
+	fs.BoolVar(&cfg.TUI, "tui", boolFromEnv(getenv, "AWLOAD_TUI", true), "show live terminal dashboard during the run (use -tui=false to disable)")
 	logLevel := fs.String("log-level", firstNonEmpty(getenv("AWLOAD_LOG_LEVEL"), "info"), "log level: debug, info, warn, error")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
+	}
+
+	progressEverySet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "progress-every" {
+			progressEverySet = true
+		}
+	})
+	if cfg.TUI && !progressEverySet {
+		cfg.ProgressEvery = 250 * time.Millisecond
 	}
 
 	level, err := parseLogLevel(*logLevel)

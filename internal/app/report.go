@@ -23,6 +23,10 @@ type Report struct {
 	P50                 time.Duration     `json:"p50"`
 	P95                 time.Duration     `json:"p95"`
 	P99                 time.Duration     `json:"p99"`
+	BytesSent           int64             `json:"bytes_sent"`
+	BytesReceived       int64             `json:"bytes_received"`
+	BytesSentPerSecond     float64        `json:"bytes_sent_per_second"`
+	BytesReceivedPerSecond float64        `json:"bytes_received_per_second"`
 	Operations          []OperationReport `json:"operations"`
 	Personas            map[string]int64  `json:"personas"`
 }
@@ -38,9 +42,13 @@ type OperationReport struct {
 	Max        time.Duration    `json:"max"`
 	P50        time.Duration    `json:"p50"`
 	P95        time.Duration    `json:"p95"`
-	P99        time.Duration    `json:"p99"`
-	SampleSize int              `json:"sample_size"`
-	Failures   map[string]int64 `json:"failures,omitempty"`
+	P99            time.Duration    `json:"p99"`
+	SampleSize     int              `json:"sample_size"`
+	Failures       map[string]int64 `json:"failures,omitempty"`
+	BytesSent      int64            `json:"bytes_sent"`
+	BytesReceived  int64            `json:"bytes_received"`
+	AvgBytesSent   int64            `json:"avg_bytes_sent"`
+	AvgBytesReceived int64          `json:"avg_bytes_received"`
 }
 
 func reportBaseName(cfg Config, runID string) string {
@@ -73,12 +81,16 @@ func WriteReports(report Report, cfg Config) error {
 }
 
 func (r Report) MarkdownSummary() string {
-	return fmt.Sprintf("Run %s: %d operations, %d errors, %.2f ops/sec, p95 %s",
+	return fmt.Sprintf("Run %s: %d operations, %d errors, %.2f ops/sec, p95 %s, sent %s (%.1f/s), recv %s (%.1f/s)",
 		r.RunID,
 		r.TotalOperations,
 		r.TotalErrors,
 		r.OperationsPerSecond,
 		roundDuration(r.P95),
+		FormatBytes(r.BytesSent),
+		r.BytesSentPerSecond/(1<<20),
+		FormatBytes(r.BytesReceived),
+		r.BytesReceivedPerSecond/(1<<20),
 	)
 }
 
@@ -95,13 +107,15 @@ func (r Report) Markdown() string {
 	fmt.Fprintf(&b, "- Total operations: `%d`\n", r.TotalOperations)
 	fmt.Fprintf(&b, "- Errors: `%d`\n", r.TotalErrors)
 	fmt.Fprintf(&b, "- Throughput: `%.2f ops/sec`\n", r.OperationsPerSecond)
-	fmt.Fprintf(&b, "- Latency p50/p95/p99: `%s / %s / %s`\n\n", roundDuration(r.P50), roundDuration(r.P95), roundDuration(r.P99))
+	fmt.Fprintf(&b, "- Latency p50/p95/p99: `%s / %s / %s`\n", roundDuration(r.P50), roundDuration(r.P95), roundDuration(r.P99))
+	fmt.Fprintf(&b, "- Payload sent: `%s` (`%.2f MB/s`)\n", FormatBytes(r.BytesSent), r.BytesSentPerSecond/(1<<20))
+	fmt.Fprintf(&b, "- Payload received: `%s` (`%.2f MB/s`)\n\n", FormatBytes(r.BytesReceived), r.BytesReceivedPerSecond/(1<<20))
 
 	fmt.Fprintf(&b, "## Operation Metrics\n\n")
-	fmt.Fprintf(&b, "| Operation | Kind | Count | Errors | Error %% | Avg | P50 | P95 | P99 | Max |\n")
-	fmt.Fprintf(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	fmt.Fprintf(&b, "| Operation | Kind | Count | Errors | Error %% | Avg | P50 | P95 | P99 | Max | Sent | Recv | Avg recv |\n")
+	fmt.Fprintf(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, op := range r.Operations {
-		fmt.Fprintf(&b, "| `%s` | `%s` | %d | %d | %.2f | %s | %s | %s | %s | %s |\n",
+		fmt.Fprintf(&b, "| `%s` | `%s` | %d | %d | %.2f | %s | %s | %s | %s | %s | %s | %s | %s |\n",
 			op.Name,
 			op.Kind,
 			op.Count,
@@ -112,6 +126,9 @@ func (r Report) Markdown() string {
 			roundDuration(op.P95),
 			roundDuration(op.P99),
 			roundDuration(op.Max),
+			FormatBytes(op.BytesSent),
+			FormatBytes(op.BytesReceived),
+			FormatBytes(op.AvgBytesReceived),
 		)
 	}
 
@@ -161,10 +178,14 @@ type jsonReport struct {
 	StartedAt           time.Time              `json:"started_at"`
 	EndedAt             time.Time              `json:"ended_at"`
 	ElapsedMS           int64                  `json:"elapsed_ms"`
-	TotalOperations     int64                  `json:"total_operations"`
-	TotalErrors         int64                  `json:"total_errors"`
-	OperationsPerSecond float64                `json:"operations_per_second"`
-	LatencyMS           map[string]float64     `json:"latency_ms"`
+	TotalOperations        int64                  `json:"total_operations"`
+	TotalErrors            int64                  `json:"total_errors"`
+	OperationsPerSecond    float64                `json:"operations_per_second"`
+	BytesSent              int64                  `json:"bytes_sent"`
+	BytesReceived          int64                  `json:"bytes_received"`
+	BytesSentPerSecond     float64                `json:"bytes_sent_per_second"`
+	BytesReceivedPerSecond float64                `json:"bytes_received_per_second"`
+	LatencyMS              map[string]float64     `json:"latency_ms"`
 	Personas            map[string]int64       `json:"personas"`
 	Operations          []jsonOperationReport  `json:"operations"`
 	Config              map[string]interface{} `json:"config"`
@@ -175,10 +196,14 @@ type jsonOperationReport struct {
 	Kind       string             `json:"kind"`
 	Count      int64              `json:"count"`
 	Errors     int64              `json:"errors"`
-	ErrorRate  float64            `json:"error_rate"`
-	LatencyMS  map[string]float64 `json:"latency_ms"`
-	SampleSize int                `json:"sample_size"`
-	Failures   map[string]int64   `json:"failures,omitempty"`
+	ErrorRate          float64            `json:"error_rate"`
+	LatencyMS          map[string]float64 `json:"latency_ms"`
+	SampleSize         int                `json:"sample_size"`
+	Failures           map[string]int64   `json:"failures,omitempty"`
+	BytesSent          int64              `json:"bytes_sent"`
+	BytesReceived      int64              `json:"bytes_received"`
+	AvgBytesSent       int64              `json:"avg_bytes_sent"`
+	AvgBytesReceived   int64              `json:"avg_bytes_received"`
 }
 
 func (r Report) jsonView() jsonReport {
@@ -198,18 +223,26 @@ func (r Report) jsonView() jsonReport {
 				"p95": durationMS(op.P95),
 				"p99": durationMS(op.P99),
 			},
-			SampleSize: op.SampleSize,
-			Failures:   op.Failures,
+			SampleSize:       op.SampleSize,
+			Failures:         op.Failures,
+			BytesSent:        op.BytesSent,
+			BytesReceived:    op.BytesReceived,
+			AvgBytesSent:     op.AvgBytesSent,
+			AvgBytesReceived: op.AvgBytesReceived,
 		})
 	}
 	return jsonReport{
-		RunID:               r.RunID,
-		StartedAt:           r.StartedAt,
-		EndedAt:             r.EndedAt,
-		ElapsedMS:           r.Elapsed.Milliseconds(),
-		TotalOperations:     r.TotalOperations,
-		TotalErrors:         r.TotalErrors,
-		OperationsPerSecond: r.OperationsPerSecond,
+		RunID:                  r.RunID,
+		StartedAt:              r.StartedAt,
+		EndedAt:                r.EndedAt,
+		ElapsedMS:              r.Elapsed.Milliseconds(),
+		TotalOperations:        r.TotalOperations,
+		TotalErrors:            r.TotalErrors,
+		OperationsPerSecond:    r.OperationsPerSecond,
+		BytesSent:              r.BytesSent,
+		BytesReceived:          r.BytesReceived,
+		BytesSentPerSecond:     r.BytesSentPerSecond,
+		BytesReceivedPerSecond: r.BytesReceivedPerSecond,
 		LatencyMS: map[string]float64{
 			"p50": durationMS(r.P50),
 			"p95": durationMS(r.P95),

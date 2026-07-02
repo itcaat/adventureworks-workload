@@ -47,23 +47,24 @@ func TestRunUserDrainsInFlightOperation(t *testing.T) {
 		Name:   "slow",
 		Kind:   "read",
 		Weight: 1,
-		Run: func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) error {
+		Run: func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) (TrafficStats, error) {
 			close(started)
 			select {
 			case <-time.After(50 * time.Millisecond):
-				return nil
+				return TrafficStats{Sent: 128, Received: 256}, nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return TrafficStats{}, ctx.Err()
 			}
 		},
 	}}
 
 	cfg := Config{ThinkMin: 0, ThinkMax: 0, RequestTimeout: time.Second}
 	recorder := NewRecorder("test", cfg, ops)
+	tracker := &userTracker{}
 
 	done := make(chan struct{})
 	go func() {
-		runUser(workloadCtx, opBase, nil, cfg, recorder, ops, 1)
+		runUser(workloadCtx, opBase, nil, cfg, recorder, tracker, ops, 1)
 		close(done)
 	}()
 

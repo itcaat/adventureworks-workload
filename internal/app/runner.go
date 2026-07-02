@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (Report, error) {
+func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger, onProgress ProgressFunc) (Report, error) {
 	runID := cfg.RunID()
 	ops := buildOperations(cfg, runID)
 	if len(ops) == 0 {
@@ -26,6 +26,7 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 	defer opCancel()
 
 	recorder := NewRecorder(runID, cfg, ops)
+	tracker := &userTracker{}
 	started := time.Now()
 	logger.Info("starting workload",
 		"run_id", runID,
@@ -57,15 +58,17 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 				return
 			case <-timer.C:
 			}
-			runUser(workloadCtx, opBase, db, cfg, recorder, ops, id)
+			runUser(workloadCtx, opBase, db, cfg, recorder, tracker, ops, id)
 		}(userID, delay)
 	}
 
+	progressStop := make(chan struct{})
 	progressDone := make(chan struct{})
-	go logProgress(workloadCtx, recorder, cfg, logger, progressDone)
+	go reportProgress(parent, workloadCtx, recorder, tracker, cfg, started, logger, onProgress, progressStop, progressDone)
 
 	wg.Wait()
 	<-drainLogged
+	close(progressStop)
 	<-progressDone
 
 	ended := time.Now()
@@ -80,7 +83,10 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 	return report, parent.Err()
 }
 
-func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, recorder *Recorder, ops []Operation, userID int) {
+func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, recorder *Recorder, tracker *userTracker, ops []Operation, userID int) {
+	tracker.add(1)
+	defer tracker.add(-1)
+
 	rng := rand.New(rand.NewSource(cfg.Seed + int64(userID)*7919))
 	persona := newPersona(userID, rng)
 
@@ -94,9 +100,9 @@ func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, record
 		op := chooseOperation(ops, persona, rng)
 		opCtx, cancel := context.WithTimeout(opBase, cfg.RequestTimeout)
 		started := time.Now()
-		err := op.Run(opCtx, db, rng, persona)
+		traffic, err := op.Run(opCtx, db, rng, persona)
 		cancel()
-		recorder.Record(op.Name, op.Kind, persona.Type, time.Since(started), err)
+		recorder.Record(op.Name, op.Kind, persona.Type, time.Since(started), err, traffic)
 
 		select {
 		case <-workloadCtx.Done():
@@ -123,26 +129,51 @@ func startDelay(cfg Config, userID int) time.Duration {
 	return time.Duration(userID-1) * step
 }
 
-func logProgress(ctx context.Context, recorder *Recorder, cfg Config, logger *slog.Logger, done chan<- struct{}) {
+func reportProgress(parent, workloadCtx context.Context, recorder *Recorder, tracker *userTracker, cfg Config, started time.Time, logger *slog.Logger, onProgress ProgressFunc, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
-	if cfg.ProgressEvery <= 0 {
-		<-ctx.Done()
+	if cfg.ProgressEvery <= 0 && onProgress == nil {
+		select {
+		case <-parent.Done():
+		case <-stop:
+		}
 		return
 	}
-	ticker := time.NewTicker(cfg.ProgressEvery)
+	interval := cfg.ProgressEvery
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	emit := func(phase RunPhase) {
+		elapsed := time.Since(started)
+		snap := recorder.LiveSnapshot(elapsed, phase, tracker.count())
+		if onProgress != nil {
+			onProgress(snap)
+			return
+		}
+		if logger != nil {
+			logger.Info("progress",
+				"operations", snap.TotalOperations,
+				"errors", snap.TotalErrors,
+				"ops_per_sec", fmt.Sprintf("%.2f", snap.OperationsPerSecond),
+				"p95_ms", fmt.Sprintf("%.1f", float64(snap.P95)/float64(time.Millisecond)),
+				"active_users", snap.ActiveUsers,
+				"phase", snap.Phase,
+			)
+		}
+	}
+
 	for {
 		select {
-		case <-ctx.Done():
+		case <-parent.Done():
+			return
+		case <-stop:
+			emit(PhaseDone)
 			return
 		case <-ticker.C:
-			s := recorder.Snapshot()
-			logger.Info("progress",
-				"operations", s.TotalOperations,
-				"errors", s.TotalErrors,
-				"ops_per_sec", fmt.Sprintf("%.2f", s.OperationsPerSecond),
-				"p95_ms", fmt.Sprintf("%.1f", float64(s.P95)/float64(time.Millisecond)),
-			)
+			elapsed := time.Since(started)
+			emit(computePhase(elapsed, cfg, workloadCtx))
 		}
 	}
 }

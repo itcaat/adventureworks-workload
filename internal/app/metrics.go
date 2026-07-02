@@ -20,15 +20,17 @@ type Recorder struct {
 }
 
 type operationRecorder struct {
-	Name      string
-	Kind      string
-	Count     int64
-	Errors    int64
-	Total     time.Duration
-	Min       time.Duration
-	Max       time.Duration
-	Latencies []time.Duration
-	Failures  map[string]int64
+	Name          string
+	Kind          string
+	Count         int64
+	Errors        int64
+	Total         time.Duration
+	Min           time.Duration
+	Max           time.Duration
+	Latencies     []time.Duration
+	Failures      map[string]int64
+	BytesSent     int64
+	BytesReceived int64
 }
 
 type Snapshot struct {
@@ -49,7 +51,7 @@ func NewRecorder(runID string, cfg Config, ops []Operation) *Recorder {
 	}
 }
 
-func (r *Recorder) Record(name, kind, persona string, latency time.Duration, err error) {
+func (r *Recorder) Record(name, kind, persona string, latency time.Duration, err error, traffic TrafficStats) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -60,6 +62,8 @@ func (r *Recorder) Record(name, kind, persona string, latency time.Duration, err
 	}
 	s.Count++
 	s.Total += latency
+	s.BytesSent += traffic.Sent
+	s.BytesReceived += traffic.Received
 	if s.Min == 0 || latency < s.Min {
 		s.Min = latency
 	}
@@ -79,7 +83,73 @@ func (r *Recorder) Record(name, kind, persona string, latency time.Duration, err
 func (r *Recorder) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.snapshotLocked()
+}
 
+func (r *Recorder) LiveSnapshot(elapsed time.Duration, phase RunPhase, activeUsers int) LiveSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	base := r.snapshotLocked()
+	ops := make([]OperationLive, 0, len(r.stats))
+	for _, s := range r.stats {
+		live := OperationLive{
+			Name:          s.Name,
+			Kind:          s.Kind,
+			Count:         s.Count,
+			Errors:        s.Errors,
+			P95:           percentile(s.Latencies, 0.95),
+			BytesSent:     s.BytesSent,
+			BytesReceived: s.BytesReceived,
+		}
+		if s.Count > 0 {
+			live.ErrorRate = float64(s.Errors) / float64(s.Count)
+		}
+		ops = append(ops, live)
+	}
+	sort.Slice(ops, func(i, j int) bool { return ops[i].Name < ops[j].Name })
+
+	personas := make(map[string]int64, len(r.persona))
+	for k, v := range r.persona {
+		personas[k] = v
+	}
+
+	var bytesSent, bytesReceived int64
+	for _, s := range r.stats {
+		bytesSent += s.BytesSent
+		bytesReceived += s.BytesReceived
+	}
+	elapsedSec := elapsed.Seconds()
+	if elapsedSec == 0 {
+		elapsedSec = 1
+	}
+
+	return LiveSnapshot{
+		RunID:               r.runID,
+		Profile:             r.cfg.Profile,
+		WriteMode:           r.cfg.WriteMode,
+		Users:               r.cfg.Users,
+		Duration:            r.cfg.Duration,
+		Ramp:                r.cfg.Ramp,
+		Elapsed:             elapsed,
+		Phase:                  phase,
+		ActiveUsers:            activeUsers,
+		TotalOperations:     base.TotalOperations,
+		TotalErrors:         base.TotalErrors,
+		OperationsPerSecond: base.OperationsPerSecond,
+		P50:                 percentile(allLatencies(r.stats), 0.50),
+		P95:                 base.P95,
+		P99:                 percentile(allLatencies(r.stats), 0.99),
+		BytesSent:           bytesSent,
+		BytesReceived:       bytesReceived,
+		BytesSentPerSecond:  float64(bytesSent) / elapsedSec,
+		BytesReceivedPerSecond: float64(bytesReceived) / elapsedSec,
+		Operations:          ops,
+		Personas:            personas,
+	}
+}
+
+func (r *Recorder) snapshotLocked() Snapshot {
 	var all []time.Duration
 	var total, errors int64
 	for _, s := range r.stats {
@@ -97,6 +167,14 @@ func (r *Recorder) Snapshot() Snapshot {
 		OperationsPerSecond: float64(total) / elapsed,
 		P95:                 percentile(all, 0.95),
 	}
+}
+
+func allLatencies(stats map[string]*operationRecorder) []time.Duration {
+	var all []time.Duration
+	for _, s := range stats {
+		all = append(all, s.Latencies...)
+	}
+	return all
 }
 
 func (r *Recorder) Report(started, ended time.Time) Report {
@@ -118,6 +196,8 @@ func (r *Recorder) Report(started, ended time.Time) Report {
 	for _, s := range r.stats {
 		report.TotalOperations += s.Count
 		report.TotalErrors += s.Errors
+		report.BytesSent += s.BytesSent
+		report.BytesReceived += s.BytesReceived
 		all = append(all, s.Latencies...)
 		report.Operations = append(report.Operations, operationReport(*s))
 	}
@@ -128,7 +208,10 @@ func (r *Recorder) Report(started, ended time.Time) Report {
 		report.Personas[k] = v
 	}
 	if report.Elapsed > 0 {
-		report.OperationsPerSecond = float64(report.TotalOperations) / report.Elapsed.Seconds()
+		secs := report.Elapsed.Seconds()
+		report.OperationsPerSecond = float64(report.TotalOperations) / secs
+		report.BytesSentPerSecond = float64(report.BytesSent) / secs
+		report.BytesReceivedPerSecond = float64(report.BytesReceived) / secs
 	}
 	report.P50 = percentile(all, 0.50)
 	report.P95 = percentile(all, 0.95)
@@ -138,21 +221,25 @@ func (r *Recorder) Report(started, ended time.Time) Report {
 
 func operationReport(s operationRecorder) OperationReport {
 	out := OperationReport{
-		Name:       s.Name,
-		Kind:       s.Kind,
-		Count:      s.Count,
-		Errors:     s.Errors,
-		Min:        s.Min,
-		Max:        s.Max,
-		P50:        percentile(s.Latencies, 0.50),
-		P95:        percentile(s.Latencies, 0.95),
-		P99:        percentile(s.Latencies, 0.99),
-		Avg:        0,
-		Failures:   s.Failures,
-		SampleSize: len(s.Latencies),
+		Name:          s.Name,
+		Kind:          s.Kind,
+		Count:         s.Count,
+		Errors:        s.Errors,
+		Min:           s.Min,
+		Max:           s.Max,
+		P50:           percentile(s.Latencies, 0.50),
+		P95:           percentile(s.Latencies, 0.95),
+		P99:           percentile(s.Latencies, 0.99),
+		Avg:           0,
+		Failures:      s.Failures,
+		SampleSize:    len(s.Latencies),
+		BytesSent:     s.BytesSent,
+		BytesReceived: s.BytesReceived,
 	}
 	if s.Count > 0 {
 		out.Avg = time.Duration(int64(s.Total) / s.Count)
+		out.AvgBytesSent = s.BytesSent / s.Count
+		out.AvgBytesReceived = s.BytesReceived / s.Count
 	}
 	if s.Count > 0 {
 		out.ErrorRate = float64(s.Errors) / float64(s.Count)
