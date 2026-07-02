@@ -17,8 +17,13 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 		return Report{}, fmt.Errorf("no operations enabled for profile=%s write-mode=%s", cfg.Profile, cfg.WriteMode)
 	}
 
-	ctx, cancel := context.WithTimeout(parent, cfg.Duration)
-	defer cancel()
+	workloadCtx, workloadCancel := context.WithTimeout(parent, cfg.Duration)
+	defer workloadCancel()
+
+	// Operation contexts are not tied to workload duration so in-flight SQL can finish
+	// after the configured run window ends instead of failing with deadline exceeded.
+	opBase, opCancel := context.WithCancel(parent)
+	defer opCancel()
 
 	recorder := NewRecorder(runID, cfg, ops)
 	started := time.Now()
@@ -30,6 +35,15 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 		"write_mode", cfg.WriteMode,
 	)
 
+	drainLogged := make(chan struct{})
+	go func() {
+		defer close(drainLogged)
+		<-workloadCtx.Done()
+		if workloadCtx.Err() == context.DeadlineExceeded {
+			logger.Info("workload duration elapsed, draining in-flight operations")
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for userID := 1; userID <= cfg.Users; userID++ {
 		delay := startDelay(cfg, userID)
@@ -39,19 +53,19 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 			timer := time.NewTimer(delay)
 			defer timer.Stop()
 			select {
-			case <-ctx.Done():
+			case <-workloadCtx.Done():
 				return
 			case <-timer.C:
 			}
-			runUser(ctx, db, cfg, recorder, ops, id)
+			runUser(workloadCtx, opBase, db, cfg, recorder, ops, id)
 		}(userID, delay)
 	}
 
 	progressDone := make(chan struct{})
-	go logProgress(ctx, recorder, cfg, logger, progressDone)
+	go logProgress(workloadCtx, recorder, cfg, logger, progressDone)
 
 	wg.Wait()
-	cancel()
+	<-drainLogged
 	<-progressDone
 
 	ended := time.Now()
@@ -66,28 +80,34 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger) (R
 	return report, parent.Err()
 }
 
-func runUser(ctx context.Context, db *sql.DB, cfg Config, recorder *Recorder, ops []Operation, userID int) {
+func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, recorder *Recorder, ops []Operation, userID int) {
 	rng := rand.New(rand.NewSource(cfg.Seed + int64(userID)*7919))
 	persona := newPersona(userID, rng)
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-workloadCtx.Done():
 			return
 		default:
 		}
 
 		op := chooseOperation(ops, persona, rng)
-		opCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+		opCtx, cancel := context.WithTimeout(opBase, cfg.RequestTimeout)
 		started := time.Now()
 		err := op.Run(opCtx, db, rng, persona)
 		cancel()
 		recorder.Record(op.Name, op.Kind, persona.Type, time.Since(started), err)
 
+		select {
+		case <-workloadCtx.Done():
+			return
+		default:
+		}
+
 		delay := thinkDuration(cfg, persona, rng)
 		timer := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-workloadCtx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:

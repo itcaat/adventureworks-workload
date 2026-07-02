@@ -65,7 +65,8 @@ sed -n '1,80p' reports/smoke-write-*.md
 - Read-нагрузка по стандартным объектам AdventureWorks2022.
 - Опциональная write-нагрузка через `Sales.ShoppingCartItem` с префиксом `awload-<run_id>`.
 - Плавный старт пользователей через `-ramp`.
-- Per-operation timeout.
+- `-duration` задаёт окно активной нагрузки; после него новые операции не стартуют, а уже выполняющиеся запросы дорабатывают (graceful drain).
+- Per-operation timeout через `-request-timeout`.
 - Финальный Markdown и JSON отчет в `reports/`.
 
 ## Быстрый старт
@@ -160,3 +161,5 @@ Write операции при `-write-mode cart`:
 - В read-only режиме база не изменяется.
 - В write-mode `cart` приложение пишет только в `Sales.ShoppingCartItem` и помечает свои строки префиксом `awload-`.
 - Для named instance или нестандартной аутентификации лучше передавать полный `-dsn`.
+- **Окно нагрузки и drain.** `-duration` ограничивает только время, в течение которого виртуальные пользователи запускают новые операции. Когда `duration` истекает, приложение не обрывает SQL в полёте: каждый активный запрос завершается в рамках `-request-timeout` (по умолчанию `30s`). Новые операции и think-time между ними после окончания `duration` не выполняются. В лог пишется `workload duration elapsed, draining in-flight operations`. Поле `Elapsed` в отчёте включает и drain — фактическое время работы процесса может быть чуть больше `-duration`.
+- **Прерывание.** `Ctrl+C` / `SIGTERM` отменяют и новые, и уже выполняющиеся операции.
