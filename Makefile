@@ -1,4 +1,4 @@
-.PHONY: build test tidy
+.PHONY: build test tidy release
 
 build:
 	go build ./cmd/awload
@@ -8,4 +8,7 @@ test:
 
 tidy:
 	go mod tidy
+
+release:
+	@./scripts/release.sh
 
