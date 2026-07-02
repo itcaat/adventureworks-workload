@@ -4,7 +4,7 @@ build:
 	go build ./cmd/awload
 
 test:
-	go test ./...
+	go test ./... -v
 
 tidy:
 	go mod tidy
