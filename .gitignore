@@ -1,4 +1,5 @@
 /awload
+dist/
 reports/
 *.exe
 *.test
