@@ -2,7 +2,6 @@ package app
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,15 +91,17 @@ func TestWriteReportsCreatesTimestampedFiles(t *testing.T) {
 		Personas:  map[string]int64{},
 	}
 
-	if err := WriteReports(report, cfg); err != nil {
-		t.Fatalf("WriteReports() error = %v", err)
+	mdPath, jsonPath, err := SaveReports(report, cfg)
+	if err != nil {
+		t.Fatalf("SaveReports() error = %v", err)
 	}
-
-	mdPath := filepath.Join(dir, "smoke-write-20260702T123530Z.md")
-	jsonPath := filepath.Join(dir, "smoke-write-20260702T123530Z.json")
 	for _, path := range []string{mdPath, jsonPath} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected report file %q: %v", path, err)
 		}
+	}
+
+	if err := WriteReports(report, cfg); err != nil {
+		t.Fatalf("WriteReports() error = %v", err)
 	}
 }

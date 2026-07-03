@@ -39,7 +39,7 @@ func TestStartDelayDisabledForSingleUserOrZeroRamp(t *testing.T) {
 }
 
 func TestRunUserDrainsInFlightOperation(t *testing.T) {
-	workloadCtx, stopWorkload := context.WithCancel(context.Background())
+	scheduleCtx, stopSchedule := context.WithCancel(context.Background())
 	opBase := context.Background()
 
 	started := make(chan struct{})
@@ -64,12 +64,12 @@ func TestRunUserDrainsInFlightOperation(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runUser(workloadCtx, opBase, nil, cfg, recorder, tracker, ops, 1)
+		runUser(scheduleCtx, opBase, nil, cfg, recorder, tracker, ops, 1)
 		close(done)
 	}()
 
 	<-started
-	stopWorkload()
+	stopSchedule()
 
 	select {
 	case <-done:
@@ -79,5 +79,75 @@ func TestRunUserDrainsInFlightOperation(t *testing.T) {
 
 	if snap := recorder.Snapshot(); snap.TotalErrors != 0 {
 		t.Fatalf("TotalErrors = %d, want 0", snap.TotalErrors)
+	}
+}
+
+func TestRunUserDrainsInFlightOperationAfterDurationTimeout(t *testing.T) {
+	parent := context.Background()
+	scheduleCtx, _ := context.WithTimeout(parent, 20*time.Millisecond)
+	opBase, opCancel := context.WithCancel(parent)
+	defer opCancel()
+
+	opStarted := make(chan struct{})
+	ops := []Operation{{
+		Name:   "slow",
+		Kind:   "read",
+		Weight: 1,
+		Run: func(ctx context.Context, db *sql.DB, rng *rand.Rand, p Persona) (TrafficStats, error) {
+			close(opStarted)
+			select {
+			case <-time.After(80 * time.Millisecond):
+				if ctx.Err() != nil {
+					return TrafficStats{}, ctx.Err()
+				}
+				return TrafficStats{Sent: 1, Received: 1}, nil
+			case <-ctx.Done():
+				return TrafficStats{}, ctx.Err()
+			}
+		},
+	}}
+
+	cfg := Config{ThinkMin: 0, ThinkMax: 0, RequestTimeout: time.Second}
+	recorder := NewRecorder("test", cfg, ops)
+	tracker := &userTracker{}
+
+	done := make(chan struct{})
+	go func() {
+		runUser(scheduleCtx, opBase, nil, cfg, recorder, tracker, ops, 1)
+		close(done)
+	}()
+
+	<-opStarted
+	<-scheduleCtx.Done()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runUser did not wait for in-flight operation after duration timeout")
+	}
+
+	if snap := recorder.Snapshot(); snap.TotalErrors != 0 {
+		t.Fatalf("TotalErrors = %d, want 0", snap.TotalErrors)
+	}
+}
+
+func TestOpBaseNotCancelledWhenScheduleEnds(t *testing.T) {
+	parent := context.Background()
+	scheduleCtx, _ := context.WithTimeout(parent, 20*time.Millisecond)
+	opBase, opCancel := context.WithCancel(context.Background())
+	defer opCancel()
+	go func() {
+		<-parent.Done()
+		opCancel()
+	}()
+
+	<-scheduleCtx.Done()
+	time.Sleep(10 * time.Millisecond)
+
+	if scheduleCtx.Err() != context.DeadlineExceeded {
+		t.Fatalf("schedule err = %v, want deadline exceeded", scheduleCtx.Err())
+	}
+	if opBase.Err() != nil {
+		t.Fatalf("opBase cancelled when schedule ended: %v", opBase.Err())
 	}
 }

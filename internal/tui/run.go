@@ -28,7 +28,17 @@ func RunWithWorkload(parent context.Context, cfg app.Config, workload WorkloadFu
 		report, runErr = workload(ctx, func(snap app.LiveSnapshot) {
 			program.Send(snapshotMsg(snap))
 		})
-		program.Send(finishedMsg{report: report, err: runErr})
+
+		mdPath, jsonPath, writeErr := app.SaveReports(report, cfg)
+		if writeErr != nil && runErr == nil {
+			runErr = writeErr
+		}
+		program.Send(finishedMsg{
+			report:   report,
+			err:      runErr,
+			mdPath:   mdPath,
+			jsonPath: jsonPath,
+		})
 	}()
 
 	if _, err := program.Run(); err != nil {

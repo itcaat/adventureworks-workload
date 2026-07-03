@@ -53,8 +53,9 @@ type LiveSnapshot struct {
 	BytesSentPerSecond     float64
 	BytesReceivedPerSecond float64
 
-	Operations []OperationLive
-	Personas   map[string]int64
+	Operations    []OperationLive
+	Personas      map[string]int64
+	Timeline []TimelineBucket
 }
 
 func computePhase(elapsed time.Duration, cfg Config, workloadCtx context.Context) RunPhase {

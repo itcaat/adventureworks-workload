@@ -29,6 +29,7 @@ type Report struct {
 	BytesReceivedPerSecond float64        `json:"bytes_received_per_second"`
 	Operations          []OperationReport `json:"operations"`
 	Personas            map[string]int64  `json:"personas"`
+	Timeline            []TimelineBucket  `json:"timeline,omitempty"`
 }
 
 type OperationReport struct {
@@ -59,25 +60,33 @@ func reportBaseName(cfg Config, runID string) string {
 }
 
 func WriteReports(report Report, cfg Config) error {
-	if err := os.MkdirAll(cfg.ReportDir, 0o755); err != nil {
-		return err
-	}
-	base := reportBaseName(cfg, report.RunID)
-	mdPath := filepath.Join(cfg.ReportDir, base+".md")
-	jsonPath := filepath.Join(cfg.ReportDir, base+".json")
-
-	if err := os.WriteFile(mdPath, []byte(report.Markdown()), 0o644); err != nil {
-		return err
-	}
-	encoded, err := json.MarshalIndent(report.jsonView(), "", "  ")
+	mdPath, jsonPath, err := SaveReports(report, cfg)
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(jsonPath, encoded, 0o644); err != nil {
 		return err
 	}
 	fmt.Printf("reports written: %s, %s\n", mdPath, jsonPath)
 	return nil
+}
+
+func SaveReports(report Report, cfg Config) (mdPath string, jsonPath string, err error) {
+	if err := os.MkdirAll(cfg.ReportDir, 0o755); err != nil {
+		return "", "", err
+	}
+	base := reportBaseName(cfg, report.RunID)
+	mdPath = filepath.Join(cfg.ReportDir, base+".md")
+	jsonPath = filepath.Join(cfg.ReportDir, base+".json")
+
+	if err := os.WriteFile(mdPath, []byte(report.Markdown()), 0o644); err != nil {
+		return "", "", err
+	}
+	encoded, err := json.MarshalIndent(report.jsonView(), "", "  ")
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(jsonPath, encoded, 0o644); err != nil {
+		return "", "", err
+	}
+	return mdPath, jsonPath, nil
 }
 
 func (r Report) MarkdownSummary() string {
@@ -187,6 +196,7 @@ type jsonReport struct {
 	BytesReceivedPerSecond float64                `json:"bytes_received_per_second"`
 	LatencyMS              map[string]float64     `json:"latency_ms"`
 	Personas            map[string]int64       `json:"personas"`
+	Timeline            []TimelineBucket       `json:"timeline,omitempty"`
 	Operations          []jsonOperationReport  `json:"operations"`
 	Config              map[string]interface{} `json:"config"`
 }
@@ -248,8 +258,9 @@ func (r Report) jsonView() jsonReport {
 			"p95": durationMS(r.P95),
 			"p99": durationMS(r.P99),
 		},
-		Personas:   r.Personas,
-		Operations: ops,
+		Personas:               r.Personas,
+		Timeline:               r.Timeline,
+		Operations:             ops,
 		Config: map[string]interface{}{
 			"users":           r.Config.Users,
 			"duration":        r.Config.Duration.String(),

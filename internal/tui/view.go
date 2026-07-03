@@ -34,10 +34,11 @@ func renderDashboard(cfg app.Config, snap app.LiveSnapshot) string {
 		snap.Ramp.Round(time.Millisecond),
 	)
 
-	progress := renderProgress(snap.Elapsed, snap.Duration)
+	progress := renderProgress(snap.Elapsed, snap.Duration, snap.Phase)
 	phaseLine := fmt.Sprintf("phase: %s · active users: %d/%d", snap.Phase, snap.ActiveUsers, snap.Users)
 
 	kpi := renderKPI(snap)
+	timelineChart := renderTimelineChart(snap.Timeline)
 	opsTable := renderOperationsTable(snap.Operations)
 	personas := renderPersonas(snap.Personas)
 	footer := footerStyle.Render("q stop · reports → " + cfg.ReportDir)
@@ -50,6 +51,9 @@ func renderDashboard(cfg app.Config, snap app.LiveSnapshot) string {
 		"",
 		kpi,
 		"",
+		labelStyle.Render("Requests over time"),
+		timelineChart,
+		"",
 		labelStyle.Render("Operations"),
 		opsTable,
 		"",
@@ -61,12 +65,13 @@ func renderDashboard(cfg app.Config, snap app.LiveSnapshot) string {
 	return strings.Join(sections, "\n")
 }
 
-func renderProgress(elapsed, total time.Duration) string {
+func renderProgress(elapsed, total time.Duration, phase app.RunPhase) string {
 	if total <= 0 {
 		return valueStyle.Render(fmt.Sprintf("%s / —", elapsed.Round(time.Second)))
 	}
+	draining := phase == app.PhaseDraining
 	pct := float64(elapsed) / float64(total)
-	if pct > 1 {
+	if pct > 1 && !draining {
 		pct = 1
 	}
 	width := 30
@@ -75,6 +80,14 @@ func renderProgress(elapsed, total time.Duration) string {
 		filled = width
 	}
 	bar := okStyle.Render(strings.Repeat("█", filled)) + labelStyle.Render(strings.Repeat("░", width-filled))
+	if draining && elapsed > total {
+		return fmt.Sprintf(
+			"%s  %s / %s  draining",
+			bar,
+			elapsed.Round(time.Second),
+			total.Round(time.Second),
+		)
+	}
 	return fmt.Sprintf(
 		"%s  %s / %s",
 		bar,

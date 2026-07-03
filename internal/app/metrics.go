@@ -10,13 +10,15 @@ import (
 const maxLatencySamplesPerOperation = 200000
 
 type Recorder struct {
-	mu      sync.Mutex
-	runID   string
-	cfg     Config
-	ops     []Operation
-	started time.Time
-	stats   map[string]*operationRecorder
-	persona map[string]int64
+	mu              sync.Mutex
+	runID           string
+	cfg             Config
+	ops             []Operation
+	started         time.Time
+	timelineBucketSize time.Duration
+	timelineBuckets    []timelineSlot
+	stats           map[string]*operationRecorder
+	persona         map[string]int64
 }
 
 type operationRecorder struct {
@@ -41,13 +43,17 @@ type Snapshot struct {
 }
 
 func NewRecorder(runID string, cfg Config, ops []Operation) *Recorder {
+	timelineBucketSize := timelineBucketSize(cfg.Duration)
+	timelineBucketCount := timelineBucketCount(cfg.Duration, timelineBucketSize)
 	return &Recorder{
-		runID:   runID,
-		cfg:     cfg,
-		ops:     ops,
-		started: time.Now(),
-		stats:   map[string]*operationRecorder{},
-		persona: map[string]int64{},
+		runID:              runID,
+		cfg:                cfg,
+		ops:                ops,
+		started:            time.Now(),
+		timelineBucketSize: timelineBucketSize,
+		timelineBuckets:    make([]timelineSlot, timelineBucketCount),
+		stats:              map[string]*operationRecorder{},
+		persona:            map[string]int64{},
 	}
 }
 
@@ -77,6 +83,7 @@ func (r *Recorder) Record(name, kind, persona string, latency time.Duration, err
 		s.Errors++
 		s.Failures[normalizeError(err)]++
 	}
+	r.recordTimelineBucket(err)
 	r.persona[persona]++
 }
 
@@ -144,7 +151,8 @@ func (r *Recorder) LiveSnapshot(elapsed time.Duration, phase RunPhase, activeUse
 		BytesReceived:       bytesReceived,
 		BytesSentPerSecond:  float64(bytesSent) / elapsedSec,
 		BytesReceivedPerSecond: float64(bytesReceived) / elapsedSec,
-		Operations:          ops,
+		Timeline:               r.buildTimeline(),
+		Operations:             ops,
 		Personas:            personas,
 	}
 }
@@ -216,6 +224,7 @@ func (r *Recorder) Report(started, ended time.Time) Report {
 	report.P50 = percentile(all, 0.50)
 	report.P95 = percentile(all, 0.95)
 	report.P99 = percentile(all, 0.99)
+	report.Timeline = r.buildTimeline()
 	return report
 }
 

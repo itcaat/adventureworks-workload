@@ -58,13 +58,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := app.WriteReports(report, cfg); err != nil {
-		logger.Error("write reports", "error", err)
-		os.Exit(1)
-	}
+	if !cfg.TUI {
+		if err := app.WriteReports(report, cfg); err != nil {
+			logger.Error("write reports", "error", err)
+			os.Exit(1)
+		}
 
-	fmt.Println()
-	fmt.Println(report.MarkdownSummary())
+		fmt.Println()
+		fmt.Println(report.MarkdownSummary())
+	}
 }
 
 func newLogger(cfg app.Config) *slog.Logger {

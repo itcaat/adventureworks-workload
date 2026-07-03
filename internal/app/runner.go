@@ -17,13 +17,20 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger, on
 		return Report{}, fmt.Errorf("no operations enabled for profile=%s write-mode=%s", cfg.Profile, cfg.WriteMode)
 	}
 
-	workloadCtx, workloadCancel := context.WithTimeout(parent, cfg.Duration)
-	defer workloadCancel()
+	scheduleCtx, scheduleStop := context.WithTimeout(parent, cfg.Duration)
+	defer scheduleStop()
 
-	// Operation contexts are not tied to workload duration so in-flight SQL can finish
-	// after the configured run window ends instead of failing with deadline exceeded.
-	opBase, opCancel := context.WithCancel(parent)
+	// SQL contexts are rooted in Background and only cancelled on explicit shutdown
+	// (Ctrl+C / TUI quit). Duration timeout must not cancel in-flight queries.
+	opBase, opCancel := context.WithCancel(context.Background())
 	defer opCancel()
+	go func() {
+		select {
+		case <-parent.Done():
+			opCancel()
+		case <-opBase.Done():
+		}
+	}()
 
 	recorder := NewRecorder(runID, cfg, ops)
 	tracker := &userTracker{}
@@ -39,9 +46,12 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger, on
 	drainLogged := make(chan struct{})
 	go func() {
 		defer close(drainLogged)
-		<-workloadCtx.Done()
-		if workloadCtx.Err() == context.DeadlineExceeded {
+		<-scheduleCtx.Done()
+		if scheduleCtx.Err() == context.DeadlineExceeded {
 			logger.Info("workload duration elapsed, draining in-flight operations")
+			if onProgress != nil {
+				onProgress(recorder.LiveSnapshot(time.Since(started), PhaseDraining, tracker.count()))
+			}
 		}
 	}()
 
@@ -54,17 +64,17 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger, on
 			timer := time.NewTimer(delay)
 			defer timer.Stop()
 			select {
-			case <-workloadCtx.Done():
+			case <-scheduleCtx.Done():
 				return
 			case <-timer.C:
 			}
-			runUser(workloadCtx, opBase, db, cfg, recorder, tracker, ops, id)
+			runUser(scheduleCtx, opBase, db, cfg, recorder, tracker, ops, id)
 		}(userID, delay)
 	}
 
 	progressStop := make(chan struct{})
 	progressDone := make(chan struct{})
-	go reportProgress(parent, workloadCtx, recorder, tracker, cfg, started, logger, onProgress, progressStop, progressDone)
+	go reportProgress(parent, scheduleCtx, recorder, tracker, cfg, started, logger, onProgress, progressStop, progressDone)
 
 	wg.Wait()
 	<-drainLogged
@@ -83,7 +93,7 @@ func Run(parent context.Context, db *sql.DB, cfg Config, logger *slog.Logger, on
 	return report, parent.Err()
 }
 
-func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, recorder *Recorder, tracker *userTracker, ops []Operation, userID int) {
+func runUser(scheduleCtx, opBase context.Context, db *sql.DB, cfg Config, recorder *Recorder, tracker *userTracker, ops []Operation, userID int) {
 	tracker.add(1)
 	defer tracker.add(-1)
 
@@ -91,10 +101,8 @@ func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, record
 	persona := newPersona(userID, rng)
 
 	for {
-		select {
-		case <-workloadCtx.Done():
+		if scheduleCtx.Err() != nil {
 			return
-		default:
 		}
 
 		op := chooseOperation(ops, persona, rng)
@@ -104,16 +112,14 @@ func runUser(workloadCtx, opBase context.Context, db *sql.DB, cfg Config, record
 		cancel()
 		recorder.Record(op.Name, op.Kind, persona.Type, time.Since(started), err, traffic)
 
-		select {
-		case <-workloadCtx.Done():
+		if scheduleCtx.Err() != nil {
 			return
-		default:
 		}
 
 		delay := thinkDuration(cfg, persona, rng)
 		timer := time.NewTimer(delay)
 		select {
-		case <-workloadCtx.Done():
+		case <-scheduleCtx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
@@ -129,7 +135,7 @@ func startDelay(cfg Config, userID int) time.Duration {
 	return time.Duration(userID-1) * step
 }
 
-func reportProgress(parent, workloadCtx context.Context, recorder *Recorder, tracker *userTracker, cfg Config, started time.Time, logger *slog.Logger, onProgress ProgressFunc, stop <-chan struct{}, done chan<- struct{}) {
+func reportProgress(parent, scheduleCtx context.Context, recorder *Recorder, tracker *userTracker, cfg Config, started time.Time, logger *slog.Logger, onProgress ProgressFunc, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	if cfg.ProgressEvery <= 0 && onProgress == nil {
 		select {
@@ -173,7 +179,7 @@ func reportProgress(parent, workloadCtx context.Context, recorder *Recorder, tra
 			return
 		case <-ticker.C:
 			elapsed := time.Since(started)
-			emit(computePhase(elapsed, cfg, workloadCtx))
+			emit(computePhase(elapsed, cfg, scheduleCtx))
 		}
 	}
 }
